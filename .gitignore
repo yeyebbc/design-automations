@@ -1,0 +1,28 @@
+# OS and editor metadata
+.DS_Store
+.directory
+.agents/
+
+# Local environments and test workspaces
+.venv/
+.test/
+
+# Illustrator/Affinity source and generated assets
+*.ai
+*.afdesign
+背景适配/
+高度 256/
+
+# Runtime logs, completion state, and local file lists
+*.log
+*日志*.txt
+*完成记录*.txt
+*运行状态*.txt
+*批次游标*.txt
+文件列表*.txt
+Staged_List_*.txt
+
+# Temporary and backup files
+*.tmp
+*.bak
+*~
