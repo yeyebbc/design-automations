@@ -13,8 +13,9 @@ are ignored, a UTF-8 BOM on the first line is tolerated):
   5. before resizing, hide any other art objects whose shape exactly matches
      the detected background (same geometry point-for-point, no rotation,
      and geometric bounds within 2 pt of the background's in both
-     directions); this also catches "highlight"/"overlay" copies that share
-     the background's shape
+     directions); when the detected background is a GroupItem, use its own
+     clipping mask as the geometry reference and hide only other matching
+     clipping masks, never the mask inside the background group itself
   6. resize the detected background object to 1000% x 1000% from its center
      (Transformation.CENTER); the original artwork is reused, never rebuilt
   7. wrap the enlarged background in a clipping group whose clipping path
@@ -31,11 +32,11 @@ are ignored, a UTF-8 BOM on the first line is tolerated):
 
 This script performs NO image export; that is a separate later stage.
 
-The background name rule inspects the bottom-most object's own name. An
-optional layer-name fallback exists (see the allowLayerNameMatch setting
-in the configuration block below) for files whose background artwork lives
-inside a layer named "Background"/"bg" while the art objects themselves
-are unnamed.
+The background name rule normally inspects the bottom-most object's own
+name. When that object is a clipped GroupItem, its own top-most direct
+clipping mask may carry the "Background"/"bg" name instead; that mask name
+is accepted while the whole group remains the background object. An optional
+layer-name fallback also exists (see the allowLayerNameMatch setting below).
 
 Counters (see also the log summary):
   fileCount     - number of non-empty entries read from the TXT list
@@ -51,6 +52,26 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
 */
 
 (function () {
+    // Note 1: This immediately invoked function expression keeps helper names out of the global scope.
+    // Note 2: Illustrator ExtendScript shares one global engine, so global name isolation prevents collisions.
+    // Note 3: The app object is supplied by Illustrator and is not a browser or Node.js API.
+    // Note 4: ExtendScript is based on an older JavaScript dialect, so this file uses var instead of let.
+    // Note 5: Function declarations are hoisted, which lets earlier workflow code call helpers defined later.
+    // Note 6: $.fileName is an ExtendScript host value containing the path of the running JSX file.
+    // Note 7: File and Folder are ExtendScript objects that wrap filesystem paths and operations.
+    // Note 8: Using the script folder as the root makes the batch portable between mounted locations.
+    // Note 9: Unicode escape sequences keep configured Chinese names stable across script editors.
+    // Note 10: Configuration values are grouped near the top so behavior changes remain easy to audit.
+    // Note 11: Host settings must be captured before mutation so the outer finally block can restore them.
+    // Note 12: Mutable counters are intentionally batch scoped because many helpers update shared results.
+    // Note 13: This design favors explicit state over classes because ExtendScript host objects are fragile.
+    // Note 14: A File object can exist even when its target does not, so .exists must be checked separately.
+    // Note 15: fsName asks ExtendScript for the native path representation used by the current platform.
+    // Note 16: Forward slash normalization later creates stable keys across Windows and macOS path syntax.
+    // Note 17: User interaction is disabled only during the run to prevent modal dialogs from blocking automation.
+    // Note 18: Native Illustrator failures can terminate the process before JavaScript catch blocks execute.
+    // Note 19: Durable files and stage logs therefore provide stronger recovery than in-memory state alone.
+    // Note 20: The top-level closure ends with one coordinated cleanup path for predictable host restoration.
     var oldInteractionLevel = app.userInteractionLevel;
     var scriptFile = new File($.fileName);
     var scriptFolder = scriptFile.parent;
@@ -127,6 +148,26 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
     line written so far survives. The summary is written in the outermost
     finally block.
     */
+    // Note 21: Logging is treated as an observability feature, not as part of the artwork transaction.
+    // Note 22: A null logPath means startup could not reserve a writable log file.
+    // Note 23: Returning silently keeps a logging failure from stopping production work.
+    // Note 24: UTF-8 is assigned before every open because ExtendScript stores encoding on the File object.
+    // Note 25: Append mode preserves earlier lines while adding one new durable event.
+    // Note 26: Opening and closing per line trades speed for crash-resistant evidence.
+    // Note 27: This tradeoff is valuable because Illustrator can fail with an uncatchable native signal.
+    // Note 28: writeln adds the platform line ending and avoids manual newline concatenation.
+    // Note 29: close requests a flush, which reduces the amount of log data lost after a crash.
+    // Note 30: The empty catch is deliberate because diagnostics must never become a new failure source.
+    // Note 31: Stage begin and done pairs later identify the exact host operation that did not return.
+    // Note 32: Plain text logs remain readable even when Illustrator cannot start on the next run.
+    // Note 33: A timestamped filename preserves evidence from separate sessions instead of overwriting it.
+    // Note 34: The output folder is preferred so artifacts from one batch stay together.
+    // Note 35: The script folder is a fallback for cases where output folder creation fails.
+    // Note 36: Reserving the file with write mode detects permission problems before processing begins.
+    // Note 37: The reserved file is immediately closed because log writes manage their own handles.
+    // Note 38: File handles should not remain open across app.open or saveAs native host calls.
+    // Note 39: Long-lived handles on NAS or cloud volumes can amplify latency and disconnection problems.
+    // Note 40: closeLog is still defensive because an unexpected branch may leave a handle open.
     function log(message) {
         if (logPath === null) {
             return;
@@ -188,6 +229,26 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
         return s;
     }
 
+    // Note 41: Input parsing is kept separate from document processing so malformed lists fail early.
+    // Note 42: The parser returns an array in source order because batch order is a user-visible contract.
+    // Note 43: Empty lines are ignored rather than counted as failed files.
+    // Note 44: stripBom handles text files written by Windows PowerShell with a UTF-8 BOM.
+    // Note 45: trimText removes accidental spaces around paths without changing spaces inside filenames.
+    // Note 46: readln avoids loading a potentially large list into one temporary string.
+    // Note 47: eof is a File property provided by ExtendScript, not the standard JavaScript language.
+    // Note 48: Explicit encoding prevents localized systems from interpreting UTF-8 paths as legacy text.
+    // Note 49: A missing list is logged once and represented by an empty result.
+    // Note 50: The caller can then produce a consistent summary instead of crashing at startup.
+    // Note 51: File.open returns a Boolean, but this older function relies on exceptions and later reads.
+    // Note 52: The catch closes an opened handle to avoid leaking descriptors into a long Illustrator run.
+    // Note 53: The nested cleanup catch protects against errors raised while handling the first error.
+    // Note 54: Path validation is delayed until each item so the log can explain every invalid entry.
+    // Note 55: The .ai extension check is case insensitive for cross-platform compatibility.
+    // Note 56: Backslashes are normalized before checking the suffix because Windows paths may appear.
+    // Note 57: ensureFolder performs an idempotent create operation: existing folders are left untouched.
+    // Note 58: Failure to create the output directory is fatal because safe Save As would be impossible.
+    // Note 59: Throwing from ensureFolder lets the caller choose whether the failure is batch or file scoped.
+    // Note 60: Small parsing helpers make filesystem assumptions explicit and independently reviewable.
     function readFileList(fileObj) {
         var result = [];
         if (!fileObj.exists) {
@@ -237,8 +298,58 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
         return "$" + encodeURIComponent(normalizedFsName(fileObj));
     }
 
-    function readCompletionRecords(fileObj) {
+    // Note 61: Resume keys identify source paths, while record values identify verified output paths.
+    // Note 62: encodeURIComponent escapes tabs and path punctuation before data is stored in a TSV line.
+    // Note 63: A leading dollar sign prevents a path from matching inherited Object property names.
+    // Note 64: Plain objects are used as hash maps because ES3 ExtendScript does not provide Map.
+    // Note 65: The Boolean true value makes membership checks explicit rather than relying on truthy paths.
+    // Note 66: new File normalizes each user path through the same completionKey function.
+    // Note 67: Requested keys limit expensive filesystem checks to sources in the current batch.
+    // Note 68: This matters when an old completion file contains thousands of NAS and cloud paths.
+    // Note 69: Reading irrelevant text records is cheap compared with stat calls on disconnected mounts.
+    // Note 70: Filtering before decode and File.exists avoids accidental network access.
+    // Note 71: Completion records are append only so a crash cannot corrupt earlier successful entries.
+    // Note 72: Duplicate records are harmless because assigning the same key replaces the map value.
+    // Note 73: A record alone is not trusted because saveAs may have been followed by file deletion.
+    // Note 74: Output existence is rechecked before a source can be marked as resumed.
+    // Note 75: Source existence is checked later by processOneFile because resume may skip opening it.
+    // Note 76: Stable path normalization is essential when the same list is generated on another platform.
+    // Note 77: A moved source intentionally receives a new key and is processed as a different input.
+    // Note 78: A moved output invalidates the old record and causes a safe new output to be created.
+    // Note 79: This conservative policy favors correctness over aggressive path guessing.
+    // Note 80: The requested-key set scopes legacy migration checks to sources in the current run.
+    function buildRequestedCompletionKeys(paths) {
+        var requested = {};
+        for (var i = 0; i < paths.length; i++) {
+            requested[completionKey(new File(paths[i]))] = true;
+        }
+        return requested;
+    }
+
+    // Note 81: Completion loading is a validation pass, not a blind deserialization step.
+    // Note 82: staleCount aggregates warnings so one bad record does not cause one slow log write.
+    // Note 83: malformedCount separates encoding or format problems from missing output files.
+    // Note 84: Missing completion storage is a normal first-run condition and returns an empty map.
+    // Note 85: Each nonempty line is split on tabs because encoded paths cannot contain raw tabs.
+    // Note 86: The DONE token is a simple schema version guard for unrelated or partial lines.
+    // Note 87: Fields beyond index two can be added later without breaking this minimum parser.
+    // Note 88: Membership is checked before decodeURIComponent to avoid work for unrelated records.
+    // Note 89: Membership is also checked before File.exists to prevent slow remote path probes.
+    // Note 90: recordedOutput.exists verifies that the durable artifact still exists now.
+    // Note 91: A valid record is stored under the encoded source key for constant-time lookup.
+    // Note 92: A stale record remains on disk for audit history but is ignored for resume.
+    // Note 93: Malformed relevant records are counted and ignored rather than stopping the batch.
+    // Note 94: The entire read is wrapped because mounted volumes can disappear during iteration.
+    // Note 95: The recovery close uses fileObj.opened so it does not reopen a failed file.
+    // Note 96: Aggregated warnings are emitted after the record handle is closed.
+    // Note 97: Closing first avoids nested open and close traffic on the same remote directory.
+    // Note 98: The returned object contains only records proven relevant and currently usable.
+    // Note 99: processOneFile treats presence in this object as permission to skip app.open.
+    // Note 100: This boundary keeps recovery logic independent from Illustrator document logic.
+    function readCompletionRecords(fileObj, requestedKeys) {
         var completed = {};
+        var staleCount = 0;
+        var malformedCount = 0;
         if (!fileObj.exists) {
             return completed;
         }
@@ -257,16 +368,26 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
                 if (parts.length < 3 || parts[0] !== "DONE") {
                     continue;
                 }
+
+                // A completion file can contain thousands of records from
+                // earlier runs and other mount points. Only records relevant
+                // to the current input list may trigger filesystem checks;
+                // probing every stale NAS/cloud path can block Illustrator for
+                // minutes before the first source document is opened.
+                if (requestedKeys[parts[1]] !== true) {
+                    continue;
+                }
+
                 try {
                     var outputPath = decodeURIComponent(parts[2]);
                     var recordedOutput = new File(outputPath);
                     if (recordedOutput.exists) {
                         completed[parts[1]] = normalizedFsName(recordedOutput);
                     } else {
-                        log("WARN stale completion record ignored; output missing: " + outputPath);
+                        staleCount++;
                     }
                 } catch (recordError) {
-                    log("WARN malformed completion record ignored: " + recordError);
+                    malformedCount++;
                 }
             }
             fileObj.close();
@@ -274,10 +395,27 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
             log("WARN failed to read completion records: " + e);
             try { if (fileObj.opened) { fileObj.close(); } } catch (ignore) {}
         }
+        if (staleCount > 0) {
+            log("WARN ignored " + staleCount +
+                " stale completion record(s) relevant to the current input list.");
+        }
+        if (malformedCount > 0) {
+            log("WARN ignored " + malformedCount +
+                " malformed completion record(s) relevant to the current input list.");
+        }
         return completed;
     }
 
-    function importLegacyCompletionRecords(folderObj, completed, recordFile) {
+    function hasMissingRequestedCompletion(requestedKeys, completed) {
+        for (var key in requestedKeys) {
+            if (requestedKeys[key] === true && completed[key] === undefined) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function importLegacyCompletionRecords(folderObj, completed, recordFile, requestedKeys) {
         var imported = 0;
         var logs = [];
         try {
@@ -313,12 +451,14 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
                     }
                     if (statusDone && currentSource !== null && line.indexOf("Output: ") === 0) {
                         var sourceFile = new File(currentSource);
-                        var outputFile = new File(line.substring(8));
                         var key = completionKey(sourceFile);
-                        if (sourceFile.exists && outputFile.exists && completed[key] === undefined) {
-                            completed[key] = normalizedFsName(outputFile);
-                            if (appendCompletionRecord(recordFile, sourceFile, outputFile)) {
-                                imported++;
+                        if (requestedKeys[key] === true) {
+                            var outputFile = new File(line.substring(8));
+                            if (sourceFile.exists && outputFile.exists && completed[key] === undefined) {
+                                completed[key] = normalizedFsName(outputFile);
+                                if (appendCompletionRecord(recordFile, sourceFile, outputFile)) {
+                                    imported++;
+                                }
                             }
                         }
                         statusDone = false;
@@ -370,6 +510,26 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
         logStage(sequence, total, path, stage, "done");
     }
 
+    // Note 101: Output naming is intentionally deterministic before collision handling is applied.
+    // Note 102: pathBaseName accepts both slash styles because lists may move between operating systems.
+    // Note 103: lastIndexOf avoids depending on host-specific path parsing libraries.
+    // Note 104: The final extension is removed without changing dots that are part of the base name.
+    // Note 105: sanitizeFileName replaces characters forbidden by common Windows and macOS filesystems.
+    // Note 106: Sanitizing twice also cleans a caller-provided fallback name.
+    // Note 107: trimText prevents filenames made only from spaces or trailing separators.
+    // Note 108: The final untitled fallback guarantees that Save As always receives a nonempty name.
+    // Note 109: getUniqueAiFile checks both names chosen in memory and files already on disk.
+    // Note 110: Disk checks protect crash leftovers that were saved before a completion record existed.
+    // Note 111: The lowercase key provides case-insensitive collision handling on mixed filesystems.
+    // Note 112: Prefixing the map key again avoids inherited Object names such as constructor.
+    // Note 113: Numbering starts at two because the unsuffixed filename is the preferred first choice.
+    // Note 114: The loop creates a fresh File object after every candidate name change.
+    // Note 115: Existing output files are never overwritten, even when their completion record is stale.
+    // Note 116: The chosen name is reserved in usedNames before the function returns.
+    // Note 117: Reservation prevents two different source paths with the same base name from colliding.
+    // Note 118: This function does not create the output file; saveAs performs that operation later.
+    // Note 119: Delaying creation avoids empty files for documents skipped during validation.
+    // Note 120: Naming policy is isolated so future suffix rules do not touch artwork processing.
     function pathBaseName(path) {
         var normalized = String(path).replace(/\\/g, "/");
         var idx = normalized.lastIndexOf("/");
@@ -414,6 +574,26 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
     and every containing layer are all visible. Checking item.hidden alone
     is not sufficient.
     */
+    // Note 121: Illustrator visibility is inherited through groups and layers rather than stored once.
+    // Note 122: A visible child inside a hidden parent is not effectively visible on the canvas.
+    // Note 123: Walking parent links models this inherited state directly.
+    // Note 124: Layers expose visible, while ordinary page items commonly expose hidden.
+    // Note 125: Property access is guarded because different Illustrator DOM types expose different fields.
+    // Note 126: A property error returns false so uncertain artwork is never selected as the background.
+    // Note 127: The walk stops at Document or Application because higher objects do not affect artwork state.
+    // Note 128: The stacking search iterates from the last collection index toward zero.
+    // Note 129: Illustrator pageItems use index zero for the top of the stacking order.
+    // Note 130: Therefore the last visible sibling is the visually bottom-most candidate.
+    // Note 131: Layer order follows the same top-to-bottom collection convention.
+    // Note 132: Groups occupy one stacking slot even though layer.pageItems may expose their descendants.
+    // Note 133: isInsideGroup filters flattened descendants so the outer group remains the candidate.
+    // Note 134: Parent traversal is safer than assuming layer.pageItems contains direct children only.
+    // Note 135: Sublayers are searched bottom first only after direct page items are exhausted.
+    // Note 136: Returning the first match preserves the exact stacking rule without name-based searching.
+    // Note 137: Name validation happens after detection so matching names higher in the stack are ignored.
+    // Note 138: This separation prevents a convenient name from replacing the true bottom object.
+    // Note 139: null is used as an explicit no-candidate sentinel in this ES3-compatible code.
+    // Note 140: The visibility helpers are read only and do not mutate document state.
     function isEffectivelyVisible(item) {
         var current = item;
         while (current) {
@@ -513,6 +693,26 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
     the original state afterwards, so the saved file keeps the author's
     settings.
     */
+    // Note 141: Unlocking is implemented as a reversible state transaction over the whole document.
+    // Note 142: saved contains only objects whose original state must later be restored.
+    // Note 143: Omitting unchanged objects reduces memory use during large batches.
+    // Note 144: Layers use visible, while page items use hidden, so both states are captured.
+    // Note 145: locked is captured for layers, groups, and individual page items when available.
+    // Note 146: Each property read is isolated because one unsupported property should not lose others.
+    // Note 147: Layers are unlocked before their page items to satisfy Illustrator mutation rules.
+    // Note 148: Recursive layer traversal handles nested sublayers that may block artwork creation.
+    // Note 149: Recursive group traversal handles locks hidden inside clipped or nested groups.
+    // Note 150: Temporarily showing hidden objects allows consistent geometry and hierarchy traversal.
+    // Note 151: Business hiding decisions are applied later after the temporary unlock phase.
+    // Note 152: restoreLocks only reapplies states that were true before editing.
+    // Note 153: Newly hidden duplicate masks remain hidden because they were not originally hidden entries.
+    // Note 154: Originally hidden items are hidden again even if other processing did not select them.
+    // Note 155: Restoration errors are ignored individually so one deleted host object does not block others.
+    // Note 156: Host references can become invalid after move operations, which justifies defensive access.
+    // Note 157: The active layer is restored separately because it is document UI state, not item state.
+    // Note 158: A finally block around artwork mutations guarantees restoration after a JavaScript error.
+    // Note 159: Native process crashes can still bypass finally, so sources are always closed without saving.
+    // Note 160: This pattern resembles acquire, mutate, and release resource management in systems code.
     function unlockDocument(doc) {
         var saved = [];
         function saveState(item) {
@@ -629,6 +829,26 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
     highlight/overlay artwork does not appear in the adapted output. The
     whole document tree is searched recursively.
     */
+    // Note 161: Name-based hiding is a separate policy from geometric duplicate detection.
+    // Note 162: The regular expression is case insensitive so authoring capitalization is irrelevant.
+    // Note 163: A substring match accepts names such as HIGHLIGHT copy and overlay mobile.
+    // Note 164: Layers are hidden with visible=false because Layer does not use pageItem.hidden.
+    // Note 165: Art objects are hidden with hidden=true because they remain in the saved document.
+    // Note 166: Hiding instead of deleting preserves editable source structure in the output.
+    // Note 167: The traversal covers every top-level layer and every nested sublayer.
+    // Note 168: Group recursion is required because named overlay artwork can live inside a group.
+    // Note 169: Try blocks protect the traversal from DOM types that reject a name or hidden access.
+    // Note 170: The count records actions attempted successfully rather than objects merely inspected.
+    // Note 171: Collected names make logs useful when a visual result needs later investigation.
+    // Note 172: Empty names are not selected by this policy because the regex cannot match them.
+    // Note 173: A layer match does not stop recursion, so named descendants are still recorded.
+    // Note 174: Duplicate log entries are acceptable because layer and child hiding are distinct actions.
+    // Note 175: This pass runs after the background clipping group is created.
+    // Note 176: Running later prevents temporary unlocking from reversing the intended hidden state.
+    // Note 177: The pass does not depend on selection, active layer, or current view state.
+    // Note 178: Document-wide traversal is deterministic for a fixed Illustrator DOM hierarchy.
+    // Note 179: The final summary line is informational and does not affect completion status.
+    // Note 180: Policy helpers like this remain small so naming rules can evolve independently.
     function hideHighlightOverlay(doc) {
         var hiddenCount = 0;
         var names = [];
@@ -678,6 +898,26 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
     plain paths in the DOM, so they are compared and hidden like any other
     path (hiding a clip path does not disable its mask).
     */
+    // Note 181: Shape matching combines topology, control-point geometry, and approximate position.
+    // Note 182: The reference signature is captured before resizing so it represents original artwork.
+    // Note 183: geometricBounds are used because they exclude stroke width from the core path shape.
+    // Note 184: A null signature means the item is not a supported path-based geometry type.
+    // Note 185: Returning on unsupported geometry avoids guessing from width and height alone.
+    // Note 186: PathItem and CompoundPathItem are handled because both can describe vector outlines.
+    // Note 187: The candidate must be a different object reference from the chosen background.
+    // Note 188: Translation-invariant signatures compare shape without embedding absolute coordinates.
+    // Note 189: Position is checked separately with a two-point tolerance configured near the top.
+    // Note 190: Comparing left and top is sufficient after an exact normalized shape match fixes size.
+    // Note 191: A rotated path normally changes normalized anchors and therefore fails exact matching.
+    // Note 192: Hidden duplicates are retained in the document for nondestructive editing.
+    // Note 193: Each candidate comparison is isolated so one corrupt path cannot stop the file.
+    // Note 194: Group recursion finds path objects nested below clipping and organization groups.
+    // Note 195: Layer recursion ensures matching objects in sublayers are not missed.
+    // Note 196: Illustrator collections may expose flattened descendants, so later group code tracks visits.
+    // Note 197: Logging unnamed candidates by type makes the result understandable without a layer panel.
+    // Note 198: Exact geometry is stricter than visual bounds and avoids hiding unrelated rectangles.
+    // Note 199: The tolerance applies to placement only; it does not relax path point equality.
+    // Note 200: This function performs no resize or move, keeping comparison and mutation stages separate.
     function hideSameShapeItems(doc, background) {
         var tolerance = sameShapePositionTolerance;
         var bgBounds = null;
@@ -736,11 +976,206 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
     }
 
     /*
+    A clipped GroupItem uses a PathItem (or a path inside a CompoundPathItem)
+    with clipping=true as its mask. For a named background GroupItem, that
+    mask is the only reliable path geometry representing the group's original
+    background shape.
+    */
+    // Note 201: A clipping flag alone does not prove that a path is an active clipping mask.
+    // Note 202: Active masks also require a parent GroupItem whose clipped property is true.
+    // Note 203: The mask must be the top-most direct item because Illustrator uses stacking order.
+    // Note 204: CompoundPathItem has no single clipping property, so its child paths are inspected.
+    // Note 205: hasClippingMaskFlag answers only the low-level flag question.
+    // Note 206: isActualClippingMaskItem combines flag, parent, clipped state, and stacking position.
+    // Note 207: Splitting these questions makes DOM assumptions visible and easier to test.
+    // Note 208: isTopmostDirectItem ignores flattened descendants by checking each item parent.
+    // Note 209: The first direct child in pageItems is the top-most sibling in Illustrator.
+    // Note 210: A stale clipping=true path in an unclipped group is correctly rejected.
+    // Note 211: findGroupClippingMask never borrows a mask from a nested child group.
+    // Note 212: A nested mask clips that nested group, not the outer background group.
+    // Note 213: Requiring group.clipped prevents an ordinary unnamed group from being misclassified.
+    // Note 214: The returned mask supplies geometry while the outer group remains the resize target.
+    // Note 215: This models the observed export structure where the direct mask carries the Bg name.
+    // Note 216: Property access remains defensive because plugin-created objects can expose partial DOM data.
+    // Note 217: null communicates that no safe group mask could be identified.
+    // Note 218: Validation can then explain the missing mask instead of silently choosing another path.
+    // Note 219: The same predicate is reused for reference and candidate masks to keep rules symmetric.
+    // Note 220: Symmetric classification prevents comparing a real mask with an inactive clipping flag.
+    function hasClippingMaskFlag(item) {
+        try {
+            if (item.typename === "PathItem") {
+                return item.clipping === true;
+            }
+            if (item.typename === "CompoundPathItem") {
+                for (var i = 0; i < item.pathItems.length; i++) {
+                    if (item.pathItems[i].clipping === true) {
+                        return true;
+                    }
+                }
+            }
+        } catch (e) {}
+        return false;
+    }
+
+    function isTopmostDirectItem(item, group) {
+        var items = group.pageItems;
+        for (var i = 0; i < items.length; i++) {
+            try {
+                if (items[i].parent === group) {
+                    return items[i] === item;
+                }
+            } catch (e) {}
+        }
+        return false;
+    }
+
+    function isActualClippingMaskItem(item) {
+        if (!hasClippingMaskFlag(item)) {
+            return false;
+        }
+        try {
+            var parent = item.parent;
+            return parent !== null &&
+                parent.typename === "GroupItem" &&
+                parent.clipped === true &&
+                isTopmostDirectItem(item, parent);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function findGroupClippingMask(group) {
+        try {
+            if (group.clipped !== true) {
+                return null;
+            }
+        } catch (e) {
+            return null;
+        }
+
+        // Only the outer background group's own direct mask is a valid
+        // reference. A mask inside a nested group represents that nested group,
+        // not the named background group.
+        var items = group.pageItems;
+        for (var i = 0; i < items.length; i++) {
+            var directItem = items[i];
+            try {
+                if (directItem.parent === group && isActualClippingMaskItem(directItem)) {
+                    return directItem;
+                }
+            } catch (e) {}
+        }
+        return null;
+    }
+
+    /*
+    Group-background branch: use the background group's own clipping mask as
+    the reference, then hide only other clipping masks with identical geometry
+    and a position within the configured tolerance. The reference mask and all
+    descendants of the background group are excluded.
+    */
+    function hideSameShapeClippingMasks(doc, backgroundGroup) {
+        var referenceMask = findGroupClippingMask(backgroundGroup);
+        if (referenceMask === null) {
+            log("Info: hidden 0 same-shape clipping mask(s) " +
+                "(background group has no comparable clipping mask)");
+            return;
+        }
+
+        var referenceBounds = null;
+        try {
+            referenceBounds = referenceMask.geometricBounds;
+        } catch (e) {}
+        var referenceSignature = buildShapeSignature(referenceMask);
+        if (referenceSignature === null || referenceBounds === null) {
+            log("Info: hidden 0 same-shape clipping mask(s) " +
+                "(background group clipping mask has no comparable path geometry)");
+            return;
+        }
+
+        var tolerance = sameShapePositionTolerance;
+        var hiddenCount = 0;
+        var names = [];
+        var visited = [];
+
+        function wasVisited(item) {
+            for (var i = 0; i < visited.length; i++) {
+                if (visited[i] === item) {
+                    return true;
+                }
+            }
+            visited.push(item);
+            return false;
+        }
+
+        function visitItems(container) {
+            var items = container.pageItems;
+            for (var i = 0; i < items.length; i++) {
+                var item = items[i];
+                if (!wasVisited(item) &&
+                    !isDescendantOf(item, backgroundGroup) &&
+                    isActualClippingMaskItem(item)) {
+                    try {
+                        var candidateSignature = buildShapeSignature(item);
+                        if (candidateSignature !== null &&
+                            shapesMatch(candidateSignature, referenceSignature)) {
+                            var candidateBounds = item.geometricBounds;
+                            if (Math.abs(candidateBounds[0] - referenceBounds[0]) <= tolerance &&
+                                Math.abs(candidateBounds[1] - referenceBounds[1]) <= tolerance) {
+                                item.hidden = true;
+                                hiddenCount++;
+                                var name = String(item.name);
+                                names.push(name !== "" ? name : "(unnamed " + item.typename + ")");
+                            }
+                        }
+                    } catch (e) {
+                        log("WARN failed to compare/hide same-shape clipping mask: " + e);
+                    }
+                }
+                if (item.typename === "GroupItem") {
+                    visitItems(item);
+                }
+            }
+        }
+
+        function visitLayers(layers) {
+            for (var i = 0; i < layers.length; i++) {
+                var layer = layers[i];
+                visitItems(layer);
+                visitLayers(layer.layers);
+            }
+        }
+
+        visitLayers(doc.layers);
+        log("Info: hidden " + hiddenCount + " same-shape clipping mask(s): " + names.join(", "));
+    }
+
+    /*
     Builds a translation-invariant geometry signature for a PathItem or
     CompoundPathItem: for every sub-path, the sequence of anchors and control
     handles normalized to the first anchor, plus closed/evenodd flags.
     Returns null for non-path-based items (RasterItem, GroupItem, ...).
     */
+    // Note 221: A shape signature converts Illustrator path geometry into plain comparable data.
+    // Note 222: Plain arrays and strings are safer to retain than live host PathPoint references.
+    // Note 223: The first anchor becomes an origin so translation does not change the signature.
+    // Note 224: Every anchor is stored relative to that origin.
+    // Note 225: Left and right Bezier handles are also stored because they determine curve shape.
+    // Note 226: Omitting handles would make different curves with the same anchors look identical.
+    // Note 227: closed distinguishes a closed region from an open stroke with the same points.
+    // Note 228: evenodd distinguishes alternative fill rules for compound geometry.
+    // Note 229: Compound paths append one signature entry for each component path.
+    // Note 230: Component order remains significant, favoring copied geometry over visual heuristics.
+    // Note 231: r3 rounds coordinates to three decimals to absorb insignificant host precision noise.
+    // Note 232: Rounding is applied after translation so absolute canvas coordinates do not matter.
+    // Note 233: The semicolon-separated point string keeps one point comparison inexpensive.
+    // Note 234: shapesMatch rejects null before reading arrays, which keeps callers simple.
+    // Note 235: It first rejects different subpath counts as a fast structural check.
+    // Note 236: It then checks flags and point counts before comparing every encoded point.
+    // Note 237: Early returns avoid unnecessary work in documents containing many unrelated paths.
+    // Note 238: Exact point order means a reauthored equivalent path may not match, by design.
+    // Note 239: This conservative false-negative bias is safer than hiding the wrong artwork.
+    // Note 240: Geometry comparison is deterministic and does not depend on zoom or raster rendering.
     function buildShapeSignature(item) {
         var subPaths = [];
         var closedFlags = [];
@@ -817,6 +1252,26 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
     effects included); nothing is rebuilt, sampled, or rasterized. Line
     widths are scaled with the artwork (uniform 10x enlargement).
     */
+    // Note 241: Illustrator resize percentages use 100 as unchanged size, so 1000 means ten times larger.
+    // Note 242: Equal horizontal and vertical percentages preserve the original aspect ratio.
+    // Note 243: Transformation.CENTER keeps enlargement centered on the existing artwork.
+    // Note 244: The Boolean arguments request transformation of geometry and relevant appearance data.
+    // Note 245: Resizing the original object preserves gradients, patterns, effects, and transparency.
+    // Note 246: Rebuilding a rectangle would lose that authored appearance and is intentionally avoided.
+    // Note 247: A GroupItem can be resized as one unit while retaining its internal clipping structure.
+    // Note 248: The group mask supplies comparison geometry but the whole group is the resize target.
+    // Note 249: Resizing occurs only after same-shape masks are compared against original coordinates.
+    // Note 250: Artboard clipping occurs after resizing because the enlarged art may extend far outside.
+    // Note 251: artboardRect is ordered left, top, right, bottom rather than x, y, width, height.
+    // Note 252: Width and height are derived explicitly to avoid coordinate-system assumptions.
+    // Note 253: Illustrator vertical coordinates make height equal top minus bottom in this rectangle API.
+    // Note 254: The original parent is captured before moving the background into a new group.
+    // Note 255: The sibling below the background acts as an anchor for restoring its stacking slot.
+    // Note 256: Descendants are skipped when searching because layer pageItems may be flattened.
+    // Note 257: PLACEATEND puts the enlarged background at the bottom inside the new clipping group.
+    // Note 258: PLACEATBEGINNING moves the clipping path above the artwork where Illustrator expects it.
+    // Note 259: Both clipPath.clipping and clipGroup.clipped are required to activate clipping behavior.
+    // Note 260: Repositioning the completed group preserves unrelated artwork order in the parent.
     function resizeBackground(background) {
         background.resize(1000, 1000, true, true, true, true, true, Transformation.CENTER);
     }
@@ -945,6 +1400,26 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
         return { status: "SKIPPED", message: message };
     }
 
+    // Note 261: processOneFile is organized as a transaction with validation, mutation, save, and cleanup.
+    // Note 262: fileProcessed increments before validation so missing and invalid entries are counted.
+    // Note 263: doc starts as null, which makes the finally cleanup conditional and idempotent.
+    // Note 264: saved distinguishes a complete saveAs call from a partially created output file.
+    // Note 265: Resume validation happens before app.open to avoid unnecessary native document work.
+    // Note 266: app.open is a native boundary that can crash Illustrator outside JavaScript exception handling.
+    // Note 267: Stage markers are written immediately before and after every high-risk native operation.
+    // Note 268: Bottom-object detection and name validation occur before any document mutation.
+    // Note 269: Group backgrounds may inherit their accepted name from their own direct clipping mask.
+    // Note 270: Unsupported raster and mesh backgrounds are skipped rather than converted or rebuilt.
+    // Note 271: Temporary unlock state is enclosed in finally so JavaScript errors restore author state.
+    // Note 272: Each mutation stage wraps errors with context that appears in the batch log.
+    // Note 273: A unique output name is allocated only after artwork adaptation succeeds.
+    // Note 274: saveAs writes a new document path while the original source remains open in memory.
+    // Note 275: Closing with DONOTSAVECHANGES prevents the source path from receiving modifications.
+    // Note 276: The completion record is appended only after saveAs and clean close both return.
+    // Note 277: If saveAs fails partway, an incomplete output is removed when it is safe to do so.
+    // Note 278: If saveAs succeeded but close failed, the output is retained but not marked complete.
+    // Note 279: The outer finally attempts cleanup-close for every path that still owns a document.
+    // Note 280: Per-file isolation lets ordinary errors continue while preserving detailed failure evidence.
     function processOneFile(path, sequence, total, usedNames, completedRecords) {
         fileProcessed++;
         var sourceFile = new File(path);
@@ -988,13 +1463,29 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
 
             logStage(sequence, total, path, "validate-background", "begin");
             if (!isBackgroundItem(background)) {
-                if (allowLayerNameMatch && isBackgroundLayer(background)) {
+                var groupMask = null;
+                if (background.typename === "GroupItem") {
+                    groupMask = findGroupClippingMask(background);
+                }
+
+                if (trimText(background.name) === "" &&
+                        groupMask !== null && isBackgroundItem(groupMask)) {
+                    log("Note: unnamed GroupItem accepted because its own clipping mask " +
+                        "name matched (mask: \"" + groupMask.name + "\").");
+                } else if (allowLayerNameMatch && isBackgroundLayer(background)) {
                     log("Note: object name did not match but containing layer name matched (allowLayerNameMatch).");
                 } else {
+                    var groupMaskDetail = "";
+                    if (background.typename === "GroupItem") {
+                        groupMaskDetail = groupMask === null ?
+                            ", own clipping mask: not found" :
+                            ", own clipping mask name: \"" + groupMask.name + "\"";
+                    }
                     throw makeSkip(
                         "Bottom-most visible object name does not contain \"background\" or \"bg\" " +
                         "(name: \"" + background.name + "\", type: " + background.typename +
-                        ", layer: \"" + getContainingLayerName(background) + "\")"
+                        ", layer: \"" + getContainingLayerName(background) + "\"" +
+                        groupMaskDetail + ")"
                     );
                 }
             }
@@ -1027,9 +1518,15 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
             log("Info: parent chain (after unlock): " + describeParentChain(background));
             try {
                 try {
-                    logStage(sequence, total, path, "same-shape", "begin");
-                    hideSameShapeItems(doc, background);
-                    logStage(sequence, total, path, "same-shape", "done");
+                    if (background.typename === "GroupItem") {
+                        logStage(sequence, total, path, "same-shape-clipping-masks", "begin");
+                        hideSameShapeClippingMasks(doc, background);
+                        logStage(sequence, total, path, "same-shape-clipping-masks", "done");
+                    } else {
+                        logStage(sequence, total, path, "same-shape", "begin");
+                        hideSameShapeItems(doc, background);
+                        logStage(sequence, total, path, "same-shape", "done");
+                    }
                 } catch (shapeErr) {
                     throw new Error("hide same-shape failed: " + shapeErr);
                 }
@@ -1116,6 +1613,26 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
         }
     }
 
+    // Note 281: The summary reports aggregate state even when startup or the main loop throws.
+    // Note 282: A fallback startTime keeps duration formatting valid after unusually early failures.
+    // Note 283: Counters separate completed outputs, resumed outputs, and skipped attempts.
+    // Note 284: The expected invariant is processed equals skipped plus done for a full list pass.
+    // Note 285: Resumed is a subset of done because a verified output is still a successful result.
+    // Note 286: main owns batch-level setup while processOneFile owns document-level cleanup.
+    // Note 287: The output directory is created before the list is processed because every success needs it.
+    // Note 288: Requested completion keys are built once to scope all resume filesystem checks.
+    // Note 289: Legacy logs are scanned only while the current list still has unresolved records.
+    // Note 290: Requested-key filtering prevents unrelated historical paths from triggering existence checks.
+    // Note 291: usedNames is shared across the loop so collisions are prevented within this session.
+    // Note 292: The loop index supplies stable sequence numbers without changing source order.
+    // Note 293: processOneFile catches expected per-file failures, while the loop catch is a final guard.
+    // Note 294: The loop guard logs an unexpected exception and then advances to the next entry.
+    // Note 295: app.userInteractionLevel is changed immediately before main starts host work.
+    // Note 296: The outer catch records batch failures that occur outside normal per-file handling.
+    // Note 297: The outer finally restores Illustrator interaction settings before writing the summary.
+    // Note 298: Summary logging occurs before closeLog so the final counters reach durable storage.
+    // Note 299: No image export API appears in this workflow; output artifacts remain Illustrator files.
+    // Note 300: The closing IIFE call executes the workflow once when Illustrator evaluates the JSX file.
     function writeSummary() {
         if (startTime === null) {
             startTime = new Date();
@@ -1164,8 +1681,23 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
         log("");
 
         var usedNames = {};
-        var completedRecords = readCompletionRecords(completionFile);
-        importLegacyCompletionRecords(outputFolder, completedRecords, completionFile);
+        var requestedCompletionKeys = buildRequestedCompletionKeys(files);
+        var completedRecords = readCompletionRecords(completionFile, requestedCompletionKeys);
+
+        // Only unresolved files from this run need the legacy migration path.
+        // The importer still filters before touching source or output paths, so
+        // unrelated historical network records never trigger existence checks.
+        if (hasMissingRequestedCompletion(requestedCompletionKeys, completedRecords)) {
+            importLegacyCompletionRecords(
+                outputFolder,
+                completedRecords,
+                completionFile,
+                requestedCompletionKeys
+            );
+        } else {
+            log("Resume: all current files resolved from persistent completion records; " +
+                "legacy log import skipped.");
+        }
         for (var i = 0; i < files.length; i++) {
             try {
                 processOneFile(files[i], i + 1, files.length, usedNames, completedRecords);
