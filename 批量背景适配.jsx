@@ -86,9 +86,13 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
     // Persistent records written only after saveAs and a clean close. A later
     // run skips a source only when both its record and output file exist.
     var completionFileName = "\u80CC\u666F\u9002\u914D\u5B8C\u6210\u8BB0\u5F55.txt"; // 背景适配完成记录.txt
-    // Conservative pauses around document transitions. These reduce pressure
-    // on Illustrator's asynchronous renderer but cannot prevent native crashes.
-    var nativeSettleDelayMs = 300;
+    // Optional pauses around document transitions (one after saveAs, one
+    // after close). They reduce pressure on Illustrator's asynchronous
+    // renderer but cannot prevent native crashes. Default 0: two 300 ms waits
+    // per file cost ~45 minutes of pure waiting on a 4500-file batch, and the
+    // per-session restart limit below already bounds memory growth. Raise this
+    // if you observe save/render instability within a single session.
+    var nativeSettleDelayMs = 0;
     // Position tolerance (points) for same-shape matching: a candidate object
     // must have geometric bounds within this distance of the background in
     // both directions to be treated as the same shape (rotation is never
@@ -100,6 +104,22 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
     // for files whose background art lives in a "Background" layer while the
     // art objects themselves are unnamed).
     var allowLayerNameMatch = false;
+    // Per-session restart limit: Illustrator's native memory grows with every
+    // open/close cycle and is never fully reclaimed, which eventually crashes
+    // the process (observed at file ~274 on a 4500-file run). Processing stops
+    // after this many documents have been opened in the current session; the
+    // script writes a restart marker and quits, and the launcher script
+    // restarts Illustrator so the batch resumes via completion records.
+    var maxFilesPerSession = 200;
+    // Restart marker file (in the script folder). Its content is "CONTINUE"
+    // when the session limit was reached (Illustrator should restart), or
+    // "DONE" when every listed file already has a verified completed output.
+    // ASCII name avoids macOS filename-encoding divergence between the
+    // Illustrator ExtendScript host and shell/driver processes: on this
+    // system the same Chinese filename produced distinct byte sequences
+    // ("批次游标.txt" vs a mojibake variant), so a marker written by JSX
+    // could not be read back by the shell launcher. ASCII has one encoding.
+    var restartMarkerFileName = "batch-restart.txt";
     // ---------------------------------------------------------------------
 
     var listFile = new File(scriptFolder.fsName + "/" + listFileName);
@@ -107,6 +127,10 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
     var completionFile = new File(outputFolder.fsName + "/" + completionFileName);
 
     var logPath = null;
+    var restartMarker = new File(scriptFolder.fsName + "/" + restartMarkerFileName);
+    var sessionProcessed = 0;  // 本会话真正打开文档的条目数(恢复跳过不计入)
+    var shouldQuit = false;    // 达到会话上限后置位;主循环结束时退出 Illustrator
+    var fastForwarded = 0;     // 本会话按完成记录静默跳过的条目数
 
     // Batch counters.
     var fileCount = 0;       // valid non-empty entries read from the TXT list
@@ -142,21 +166,22 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
     }
 
     /*
-    Logging with per-line durability: each line is written by opening the
-    log in append mode, writing, and closing again, so every line is flushed
-    to disk immediately. Even if the run is interrupted or crashes, every
-    line written so far survives. The summary is written in the outermost
-    finally block.
+    Logging keeps one handle open between native calls and commits buffered
+    writes at the boundaries where a native crash could destroy evidence
+    (app.open / saveAs / doc.close). ExtendScript has no File.flush(), so a
+    commit is close() followed by reopen in append mode; log() reopens lazily
+    if a later line arrives. Every line written so far survives a native
+    crash; the summary is written in the outermost finally block.
     */
     // Note 21: Logging is treated as an observability feature, not as part of the artwork transaction.
     // Note 22: A null logPath means startup could not reserve a writable log file.
     // Note 23: Returning silently keeps a logging failure from stopping production work.
-    // Note 24: UTF-8 is assigned before every open because ExtendScript stores encoding on the File object.
+    // Note 24: UTF-8 is assigned before opening because ExtendScript stores encoding on the File object.
     // Note 25: Append mode preserves earlier lines while adding one new durable event.
-    // Note 26: Opening and closing per line trades speed for crash-resistant evidence.
-    // Note 27: This tradeoff is valuable because Illustrator can fail with an uncatchable native signal.
+    // Note 26: Keeping one handle open avoids tens of thousands of redundant opens per batch.
+    // Note 27: flushLog commits at the few boundaries where a native crash can destroy evidence.
     // Note 28: writeln adds the platform line ending and avoids manual newline concatenation.
-    // Note 29: close requests a flush, which reduces the amount of log data lost after a crash.
+    // Note 29: close commits buffered output; closeLog closes once at the end of the session.
     // Note 30: The empty catch is deliberate because diagnostics must never become a new failure source.
     // Note 31: Stage begin and done pairs later identify the exact host operation that did not return.
     // Note 32: Plain text logs remain readable even when Illustrator cannot start on the next run.
@@ -164,9 +189,9 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
     // Note 34: The output folder is preferred so artifacts from one batch stay together.
     // Note 35: The script folder is a fallback for cases where output folder creation fails.
     // Note 36: Reserving the file with write mode detects permission problems before processing begins.
-    // Note 37: The reserved file is immediately closed because log writes manage their own handles.
-    // Note 38: File handles should not remain open across app.open or saveAs native host calls.
-    // Note 39: Long-lived handles on NAS or cloud volumes can amplify latency and disconnection problems.
+    // Note 37: The handle stays open after reservation; closeLog closes it at the end.
+    // Note 38: flushLog closes the handle at native boundaries; no handle stays open across them.
+    // Note 39: log() reopens in append mode on demand, so handles never linger on NAS or cloud volumes.
     // Note 40: closeLog is still defensive because an unexpected branch may leave a handle open.
     function log(message) {
         if (logPath === null) {
@@ -174,10 +199,29 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
         }
         try {
             logPath.encoding = "UTF-8";
-            if (logPath.open("a")) {
-                logPath.writeln(message);
-                logPath.close();
+            if (!logPath.opened && !logPath.open("a")) {
+                return;
             }
+            logPath.writeln(message);
+        } catch (e) {
+            // Logging must never stop the batch.
+        }
+    }
+
+    // Keep the log handle open between native calls and commit buffered
+    // writes at the boundaries where a native crash could destroy evidence.
+    // ExtendScript has no File.flush(); close() commits, so a commit is a
+    // close followed by an append-mode reopen. log() reopens lazily if a
+    // later line arrives. The old per-line open()/close() pattern cost two
+    // filesystem opens per log line - tens of thousands of redundant opens
+    // over a large batch - for the same durability as this.
+    function flushLog() {
+        if (logPath === null || !logPath.opened) {
+            return;
+        }
+        try {
+            logPath.close();
+            logPath.open("a");
         } catch (e) {
             // Logging must never stop the batch.
         }
@@ -198,8 +242,7 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
                 var f = candidates[i];
                 f.encoding = "UTF-8";
                 if (f.open("w")) {   // create/truncate to reserve the name
-                    f.close();        // log() reopens per line and flushes
-                    logPath = f;
+                    logPath = f;     // handle stays open; closeLog closes it
                     return;
                 }
             } catch (e) {
@@ -212,10 +255,43 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
     function closeLog() {
         try {
             if (logPath !== null && logPath.opened) {
-                logPath.close();
+                logPath.close(); // close commits buffered output
             }
         } catch (e) {}
         logPath = null;
+    }
+
+    // Restart marker protocol: read/write batch-restart.txt so the external
+    // launcher knows whether to start another Illustrator session. Marker
+    // failures are non-fatal; without a marker the batch simply continues
+    // inside whatever session is running.
+    function readRestartMarker() {
+        try {
+            if (restartMarker.exists && restartMarker.open("r")) {
+                var line = trimText(stripBom(restartMarker.readln()));
+                restartMarker.close();
+                return line;
+            }
+        } catch (e) {
+            // Marker problems are not fatal; treat as absent.
+        }
+        return null;
+    }
+
+    function writeRestartMarker(state) {
+        try {
+            restartMarker.encoding = "UTF-8";
+            restartMarker.open("w");
+            // write (not writeln) keeps the marker byte-exact: a trailing
+            // platform line ending here would break the shell launcher's
+            // exact "CONTINUE"/"DONE" string comparison.
+            restartMarker.write(state);
+            restartMarker.close();
+            return true;
+        } catch (e) {
+            log("ERROR failed to write restart marker: " + e);
+            return false;
+        }
     }
 
     function trimText(s) {
@@ -1450,7 +1526,12 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
                 return;
             }
 
+            // Open-document entries consume the per-session budget; resumed
+            // entries above never touch documents, so they stay free.
+            sessionProcessed++;
+
             logStage(sequence, total, path, "open", "begin");
+            flushLog();
             doc = app.open(sourceFile);
             logStage(sequence, total, path, "open", "done");
 
@@ -1563,12 +1644,14 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
             // crash that happened before the durable completion record.
             outputFile = getUniqueAiFile(outputFolder, pathBaseName(path), usedNames);
             logStage(sequence, total, path, "saveAs", "begin");
+            flushLog();
             saveAsOutput(doc, outputFile);
             saved = true;
             logStage(sequence, total, path, "saveAs", "done");
             settleAfterNativeOperation(sequence, total, path, "settle-after-save");
 
             logStage(sequence, total, path, "close", "begin");
+            flushLog();
             doc.close(SaveOptions.DONOTSAVECHANGES);
             doc = null;
             logStage(sequence, total, path, "close", "done");
@@ -1602,6 +1685,7 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
             if (doc !== null) {
                 try {
                     logStage(sequence, total, path, "cleanup-close", "begin");
+                    flushLog();
                     doc.close(SaveOptions.DONOTSAVECHANGES);
                     doc = null;
                     logStage(sequence, total, path, "cleanup-close", "done");
@@ -1656,6 +1740,10 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
     function main() {
         startTime = new Date();
         openLog();
+        var marker = readRestartMarker();
+        if (marker !== null) {
+            log("Restart Marker: " + marker);
+        }
 
         log("Illustrator Background Adaptation Log");
         log("=====================================");
@@ -1699,6 +1787,37 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
                 "legacy log import skipped.");
         }
         for (var i = 0; i < files.length; i++) {
+            if (maxFilesPerSession > 0 && sessionProcessed >= maxFilesPerSession) {
+                // Session budget reached: entries already covered by
+                // completion records may be finished cheaply (they never open
+                // a document); anything else belongs to the next session.
+                var remainingUnfinished = false;
+                for (var j = i; j < files.length; j++) {
+                    if (completedRecords[completionKey(new File(files[j]))] === undefined) {
+                        remainingUnfinished = true;
+                        break;
+                    }
+                }
+                if (remainingUnfinished) {
+                    log("Session limit reached (" + sessionProcessed +
+                        " documents opened >= " + maxFilesPerSession +
+                        "); continuing after Illustrator restart.");
+                    break;
+                }
+            }
+            // Already-completed entries are fast-forwarded silently: they
+            // never open a document, never produce a new complete record, and
+            // writing four log lines per entry floods the tail of the log with
+            // "resumed" lines while nothing visibly progresses. Counting them
+            // keeps File Resumed exact; processing only unresolved entries
+            // keeps the tail of the log focused on actual work.
+            if (completedRecords[completionKey(new File(files[i]))] !== undefined) {
+                fileProcessed++;
+                fileDone++;
+                fileResumed++;
+                fastForwarded++;
+                continue;
+            }
             try {
                 processOneFile(files[i], i + 1, files.length, usedNames, completedRecords);
             } catch (e) {
@@ -1709,6 +1828,29 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
                 log("Status: FAILED");
                 log("Reason: unexpected per-file exception: " + e);
             }
+            // Reclaim ExtendScript wrapper objects after each file. Native
+            // Illustrator memory is bounded by the per-session restart, but
+            // this keeps the JS heap from also growing without bound.
+            if (typeof $.gc === "function") {
+                try { $.gc(); } catch (gcError) {}
+            }
+        }
+        if (fastForwarded > 0) {
+            log("Fast-forwarded " + fastForwarded +
+                " already-completed entries (no new outputs).");
+        }
+        // Restart protocol: persist the batch state before quitting. The
+        // launcher reads the marker and starts Illustrator again only for
+        // CONTINUE; DONE means every listed file has a verified output.
+        if (i < files.length && maxFilesPerSession > 0 &&
+                sessionProcessed >= maxFilesPerSession) {
+            writeRestartMarker("CONTINUE");
+            shouldQuit = true;
+            log("Restart marker set to CONTINUE; Illustrator will quit " +
+                "for the next session.");
+        } else {
+            writeRestartMarker("DONE");
+            log("Restart marker set to DONE; batch complete.");
         }
         // The summary is written in the outer finally block so it is always
         // produced, even if an unexpected error interrupts the loop.
@@ -1727,5 +1869,8 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
         }
         writeSummary();
         closeLog();
+        if (shouldQuit) {
+            app.quit();
+        }
     }
 })();
