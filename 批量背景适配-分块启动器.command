@@ -74,8 +74,12 @@ LS_REGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/Launch
 
 ai_ready() {
     # 检测 AI 是否可执行 do javascript(就绪判定)。
-    # 若 do javascript 成功返回 → AppleScript 就绪。
-    if timeout 8 osascript -e "tell application id \"$APP_ID\" to do javascript \"app.name\"" 2>/dev/null | grep -q "Illustrator"; then
+    # 注意:macOS 系统 shell 无 GNU timeout,直接用 osascript;
+    # AI 已就绪时 osascript 秒回,未就绪时 do javascript 会隐式
+    # 启动 AI(可能需 15-60s)——由外层轮询循环控制总时长。
+    local osa_out
+    osa_out=$(osascript -e "tell application id \"$APP_ID\" to do javascript \"app.name\"" 2>&1)
+    if echo "$osa_out" | grep -q "Illustrator"; then
         return 0
     fi
     # do javascript 失败(可能 AI 忙,正在执行 JSX)。
@@ -132,7 +136,21 @@ ensure_ai_ready() {
             return 0
         fi
     done
-    echo "  [ai] !! Illustrator 始终未就绪(300s 超时)" >&2
+    # 300s 仍未就绪:若 AI 进程存在,可能是卡死残留(上一次处理卡死
+    # 导致 AI 无法响应 AppleScript)。优雅退出后重启轮询。
+    if ai_ping; then
+        echo "  [ai] AI 存在但未就绪(疑似卡死残留),优雅退出后重试..."
+        stop_ai_gracefully
+        sleep 5
+        for i in $(seq 1 10); do
+            sleep 10
+            if ai_ready; then
+                echo "  [ai] 清理残留后 Illustrator 就绪(第 $i 次检查)"
+                return 0
+            fi
+        done
+    fi
+    echo "  [ai] !! Illustrator 始终未就绪(超时)" >&2
     return 1
 }
 
