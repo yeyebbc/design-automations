@@ -101,33 +101,38 @@ ai_ping() {
 
 ensure_ai_ready() {
     local i
-    # 若 AI 不在运行,用 open 启动(LaunchServices GUI 会话,
-    # 保证 AppleScript do javascript 可用;二进制后台启动的实例
-    # 无 GUI 会话,do javascript 会 -2740)。
-    if ! ai_ping; then
-        echo "  [ai] 启动 Illustrator(open)..."
-        open -a "Adobe Illustrator 2025" >/dev/null 2>&1
-    fi
-    # 轮询就绪(最长 180s,每 10s 一次)
-    for i in $(seq 1 18); do
+    # 关键:osascript do javascript 会隐式启动 Illustrator(即使
+    # LaunchServices 状态异常)-600,无需 open/二进制启动。
+    # 只需轮询 do javascript 直到成功(AI 启动需 20s-3min)。
+    # 分 3 轮每轮 100s(总计 300s),每 10s 检测一次。
+    echo "  [ai] 就绪检测(轮询 do javascript,AI 未运行会隐式启动)..."
+    for i in $(seq 1 10); do
         sleep 10
         if ai_ready; then
             echo "  [ai] Illustrator 就绪(第 $i 次检查)"
             return 0
         fi
     done
-    # 就绪失败:尝试 lsregister 修复 LaunchServices,再重试一轮
-    echo "  [ai] 就绪失败,尝试 lsregister 修复 LaunchServices..."
+    # 第二轮(隐式启动可能较慢)
+    echo "  [ai] 继续等待+尝试 lsregister 修复..."
     "$LS_REGISTER" -f "/Applications/Adobe Illustrator 2025/Adobe Illustrator.app" >/dev/null 2>&1
     sleep 5
-    for i in $(seq 1 12); do
+    for i in $(seq 1 10); do
         sleep 10
         if ai_ready; then
-            echo "  [ai] lsregister 修复后就绪(第 $i 次检查)"
+            echo "  [ai] 修复后 Illustrator 就绪(第 $i 次检查)"
             return 0
         fi
     done
-    echo "  [ai] !! Illustrator 始终未就绪(启动失败),请手动打开 Illustrator" >&2
+    # 第三轮
+    for i in $(seq 1 10); do
+        sleep 10
+        if ai_ready; then
+            echo "  [ai] Illustrator 最终就绪(第 $i 次检查)"
+            return 0
+        fi
+    done
+    echo "  [ai] !! Illustrator 始终未就绪(300s 超时)" >&2
     return 1
 }
 
