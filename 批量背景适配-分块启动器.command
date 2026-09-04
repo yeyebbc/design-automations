@@ -65,6 +65,75 @@ rebuild_list() {
     fi
 }
 
+# 确保 Illustrator 在运行并接受 AppleScript(最长等待 180s)
+# 使用二进制直接启动,随后轮询 do javascript 直到就绪;
+# 若 AppleScript 因 LaunchServices 状态损坏(-600/-2740)无法连接,
+# 尝试 lsregister 重新注册后重试。
+AI_BIN="/Applications/Adobe Illustrator 2025/Adobe Illustrator.app/Contents/MacOS/Adobe Illustrator"
+LS_REGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
+ai_ready() {
+    # 检测 AI 是否可执行 do javascript(就绪判定)
+    timeout 8 osascript -e "tell application id \"$APP_ID\" to do javascript \"app.name\"" 2>/dev/null | grep -q "Illustrator"
+}
+
+ai_ping() {
+    # 轻量检测:AI 进程是否存在
+    pgrep -f "Contents/MacOS/Adobe Illustrator" >/dev/null 2>&1
+}
+
+ensure_ai_ready() {
+    local i
+    # 若 AI 不在运行,先用二进制方式启动(不依赖 osascript launch 和 LaunchServices)
+    if ! ai_ping; then
+        echo "  [ai] 启动 Illustrator(二进制)..."
+        "$AI_BIN" >/dev/null 2>&1 &
+    fi
+    # 轮询就绪(最长 180s,每 10s 一次)
+    for i in $(seq 1 18); do
+        sleep 10
+        if ai_ready; then
+            echo "  [ai] Illustrator 就绪(第 $i 次检查)"
+            return 0
+        fi
+    done
+    # 就绪失败:尝试 lsregister 修复 LaunchServices,再重试一轮
+    echo "  [ai] 就绪失败,尝试 lsregister 修复 LaunchServices..."
+    "$LS_REGISTER" -f "/Applications/Adobe Illustrator 2025/Adobe Illustrator.app" >/dev/null 2>&1
+    sleep 5
+    for i in $(seq 1 12); do
+        sleep 10
+        if ai_ready; then
+            echo "  [ai] lsregister 修复后就绪(第 $i 次检查)"
+            return 0
+        fi
+    done
+    echo "  [ai] !! Illustrator 始终未就绪(启动失败),请手动打开 Illustrator" >&2
+    return 1
+}
+
+stop_ai_gracefully() {
+    # 卡死退出:先尝试 AppleScript quit 优雅退出,保留 LaunchServices 状态
+    osascript -e "tell application id \"$APP_ID\" to quit" >/dev/null 2>&1
+    # 等 15s 看是否退出
+    for _ in $(seq 1 15); do
+        sleep 1
+        if ! ai_ping; then
+            echo "  [ai] 已优雅退出"
+            return 0
+        fi
+    done
+    # 优雅退出失败,才强制结束
+    pkill -x "Adobe Illustrator" 2>/dev/null
+    sleep 3
+    if ! ai_ping; then
+        echo "  [ai] 已强制结束(graceful quit 超时)"
+        return 0
+    fi
+    echo "  [ai] !! Illustrator 未能退出" >&2
+    return 1
+}
+
 # 定位最新日志(排除完成记录)
 latest_log() {
     ls -t "$LOG_DIR"/*日志*.txt 2>/dev/null | head -1
@@ -104,8 +173,13 @@ while true; do
     rebuild_list
 
     echo "--- 第 $ROUND 轮:运行脚本(启动/复用 Illustrator)---"
+    # 确保 AI 运行并就绪后再发 JSX(避免 osascript -600 挂起)
+    if ! ensure_ai_ready; then
+        echo "!! 第 $ROUND 轮:Illustrator 未就绪,停止(请手动打开后重跑)" >&2
+        exit 1
+    fi
     # do javascript 阻塞到脚本结束(脚本正常 app.quit)或 Illustrator 卡死。
-    # 将其放入后台,主循环监控日志进度;若卡死则强制结束 AI 并跳过。
+    # 将其放入后台,主循环监控日志进度;若卡死则优雅退出 AI 并跳过。
     osascript <<OSA 2>/dev/null &
 tell application id "$APP_ID"
     do javascript (POSIX file "$JSX" as alias)
@@ -149,12 +223,11 @@ OSA
             fi
             echo "  已加入跳过列表 $SKIP_FILE"
         fi
-        # 强制结束 Illustrator 与 osascript(卡死,无法正常退出)
+        # 优雅退出 Illustrator(保留 LaunchServices 状态,避免下次启动失败)
         kill "$osascript_pid" 2>/dev/null
         pkill -x osascript 2>/dev/null
-        pkill -x "Adobe Illustrator" 2>/dev/null
-        sleep 3
-        echo "已强制结束 Illustrator,下一轮跳过卡死文件..."
+        stop_ai_gracefully
+        echo "已结束 Illustrator,下一轮跳过卡死文件..."
         continue
     else
         wait "$osascript_pid" 2>/dev/null
