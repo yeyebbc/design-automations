@@ -73,8 +73,25 @@ AI_BIN="/Applications/Adobe Illustrator 2025/Adobe Illustrator.app/Contents/MacO
 LS_REGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 ai_ready() {
-    # 检测 AI 是否可执行 do javascript(就绪判定)
-    timeout 8 osascript -e "tell application id \"$APP_ID\" to do javascript \"app.name\"" 2>/dev/null | grep -q "Illustrator"
+    # 检测 AI 是否可执行 do javascript(就绪判定)。
+    # 若 do javascript 成功返回 → AppleScript 就绪。
+    if timeout 8 osascript -e "tell application id \"$APP_ID\" to do javascript \"app.name\"" 2>/dev/null | grep -q "Illustrator"; then
+        return 0
+    fi
+    # do javascript 失败(可能 AI 忙,正在执行 JSX)。
+    # 判断:AI 进程存在 且 最新日志在近期更新 → 已有 JSX 在跑,视为可用。
+    local logfile last_mtime age
+    if ai_ping; then
+        logfile=$(latest_log 2>/dev/null)
+        if [ -n "$logfile" ]; then
+            last_mtime=$(stat -f %m "$logfile" 2>/dev/null || echo 0)
+            age=$(( $(date +%s) - last_mtime ))
+            if [ "$age" -lt 120 ]; then
+                return 0  # 日志 2 分钟内更新过 → JSX 正在处理
+            fi
+        fi
+    fi
+    return 1
 }
 
 ai_ping() {
@@ -84,10 +101,12 @@ ai_ping() {
 
 ensure_ai_ready() {
     local i
-    # 若 AI 不在运行,先用二进制方式启动(不依赖 osascript launch 和 LaunchServices)
+    # 若 AI 不在运行,用 open 启动(LaunchServices GUI 会话,
+    # 保证 AppleScript do javascript 可用;二进制后台启动的实例
+    # 无 GUI 会话,do javascript 会 -2740)。
     if ! ai_ping; then
-        echo "  [ai] 启动 Illustrator(二进制)..."
-        "$AI_BIN" >/dev/null 2>&1 &
+        echo "  [ai] 启动 Illustrator(open)..."
+        open -a "Adobe Illustrator 2025" >/dev/null 2>&1
     fi
     # 轮询就绪(最长 180s,每 10s 一次)
     for i in $(seq 1 18); do
