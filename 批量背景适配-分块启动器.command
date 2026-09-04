@@ -11,9 +11,15 @@
 # 自动卡死恢复:
 #   某些 .ai 文件会触发 Illustrator 原生处理死循环(如 gesture.ai、
 #   google wallet alt.ai),表现为单文件 CPU 100%、日志停滞、脚本永久等待。
-#   本脚本每轮运行后监控最新日志;若在 STALL_SECONDS(默认 240)内无新内容
-#   且 Illustrator 仍在运行,判定卡死 → 从日志定位当前文件 → 写入
-#   跳过列表.txt → 强制结束 Illustrator → 下一轮自动跳过该文件继续。
+# 本脚本每轮运行后监控最新日志;若在 STALL_SECONDS(默认 240)内无新内容
+# 且 Illustrator 仍在运行,判定卡死 → 从日志定位当前文件 → 写入
+# 跳过列表.txt → 强制结束 Illustrator → 下一轮自动跳过该文件继续。
+#
+# 崩溃恢复:
+#   Illustrator 自身可能原生崩溃(无 Summary/结束标记,进程直接退出)。
+#   本脚本识别这种"无正常结束标记的退出";若同一文件连续两轮崩溃,
+#   将该文件写入 跳过列表.txt(防死循环);否则下一轮自动重试该文件。
+#   (崩溃是间歇性的,文件常常下一次重试即成功,不能一刀切跳过。)
 #
 # 使用:
 #   1. 关闭正在运行的 Illustrator(否则 JSX 会在你的会话里执行并退出应用)。
@@ -41,6 +47,10 @@ MAX_ROUNDS=100
 STALL_SECONDS=600
 # 检查间隔
 CHECK_INTERVAL=20
+# 崩溃状态文件:记录连续崩溃文件,同一文件连续崩溃 CRASH_THRESHOLD 次 → 跳过
+CRASH_STATE_FILE="$SCRIPT_DIR/崩溃状态.txt"
+# 同一文件连续崩溃次数阈值(达到即加入跳过列表)
+CRASH_THRESHOLD=2
 
 echo "=== 批量背景适配 分块启动器 ==="
 echo "脚本: $JSX"
@@ -190,6 +200,50 @@ get_current_file() {
     tail -50 "$logfile" | grep -oE 'source=[^ ]+' | tail -1 | sed 's/^source=//'
 }
 
+# ---------------------------------------------------------------------------
+# 崩溃检测(AI 意外退出)与连续崩溃跳过
+# ---------------------------------------------------------------------------
+
+# 判断一轮日志是否正常结束:最新日志存在"Summary"结尾(即使无 DONE)。
+# 崩溃时进程直接退出,来不及写 Summary;正常结束(标记 DONE 或 CONTINUE
+# 都是会话/批次正常结束)会写入 Summary。卡死路径不会走到这里。
+log_finished_normally() {
+    local logfile
+    logfile=$(latest_log)
+    [ -n "$logfile" ] || return 1
+    grep -q "Summary" "$logfile" 2>/dev/null
+}
+
+# 从 崩溃状态.txt 读取某文件当前连续崩溃计数
+get_crash_count() {
+    local f="$1"
+    if [ -f "$CRASH_STATE_FILE" ]; then
+        grep -F "$f" "$CRASH_STATE_FILE" 2>/dev/null | tail -1 | awk '{print $NF}'
+    fi
+}
+
+# 记录一次崩溃:当前文件计数 +1;达到阈值 → 加入跳过列表并清空该文件计数
+record_crash() {
+    local f="$1"
+    [ -n "$f" ] || return
+    local prev=0
+    if [ -f "$CRASH_STATE_FILE" ] && grep -qF "$f" "$CRASH_STATE_FILE" 2>/dev/null; then
+        prev=$(get_crash_count "$f")
+    fi
+    prev=${prev:-0}
+    local new=$((prev + 1))
+    echo "$f $new" >> "$CRASH_STATE_FILE"
+    echo "  [崩溃] $f 连续崩溃 $new 次"
+    if [ "$new" -ge "$CRASH_THRESHOLD" ]; then
+        if [ -f "$SKIP_FILE" ]; then
+            grep -qxF "$f" "$SKIP_FILE" || echo "$f" >> "$SKIP_FILE"
+        else
+            echo "$f" > "$SKIP_FILE"
+        fi
+        echo "  [崩溃] $f 连续崩溃 ${CRASH_THRESHOLD} 次,已加入跳过列表"
+    fi
+}
+
 ROUND=0
 while true; do
     ROUND=$((ROUND + 1))
@@ -276,6 +330,18 @@ OSA
     fi
 
     sleep 2
+
+    # AI 意外退出(日志无 Summary):记录崩溃,为"同一文件连续崩溃→跳过"做统计。
+    # 注意正常退出(CONTINUE 或 DONE)都会写 Summary;只有原生崩溃来不及写。
+    if ! log_finished_normally; then
+        crashed_file="$(get_current_file)"
+        echo "!! 第 $ROUND 轮:Illustrator 异常退出(无 Summary),疑似崩溃"
+        if [ -n "$crashed_file" ]; then
+            record_crash "$crashed_file"
+        else
+            echo "  [崩溃] 无法定位当前文件(日志为空或无 source),跳过统计"
+        fi
+    fi
 
     # 会话结束:等退出后读标记,决定下一轮
     MARKER_STATE="$(tr -d '\r' < "$MARKER" 2>/dev/null || true)"

@@ -92,7 +92,7 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
     // per file cost ~45 minutes of pure waiting on a 4500-file batch, and the
     // per-session restart limit below already bounds memory growth. Raise this
     // if you observe save/render instability within a single session.
-    var nativeSettleDelayMs = 0;
+    var nativeSettleDelayMs = 300;
     // Position tolerance (points) for same-shape matching: a candidate object
     // must have geometric bounds within this distance of the background in
     // both directions to be treated as the same shape (rotation is never

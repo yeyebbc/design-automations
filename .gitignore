@@ -26,3 +26,7 @@ Staged_List_*.txt
 *.tmp
 *.bak
 *~
+
+# Batch runtime state
+batch-restart.txt
+崩溃状态.txt
