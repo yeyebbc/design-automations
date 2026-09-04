@@ -30,3 +30,6 @@ Staged_List_*.txt
 # Batch runtime state
 batch-restart.txt
 崩溃状态.txt
+
+# Batch logs (moved here 2026-09)
+logs/

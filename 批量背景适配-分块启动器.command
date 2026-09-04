@@ -36,7 +36,7 @@ APP_ID="com.adobe.illustrator"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 JSX="$SCRIPT_DIR/批量背景适配.jsx"
 MARKER="$SCRIPT_DIR/batch-restart.txt"
-LOG_DIR="$SCRIPT_DIR/背景适配"
+LOG_DIR="$SCRIPT_DIR/logs"
 SKIP_FILE="$SCRIPT_DIR/跳过列表.txt"
 LIST_FILE="$SCRIPT_DIR/文件列表.txt"
 

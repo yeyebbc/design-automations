@@ -81,8 +81,11 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
     var listFileName = "\u6587\u4EF6\u5217\u8868.txt";           // 文件列表.txt
     // New .ai files are saved into this folder (relative to the script).
     var outputFolderName = "\u80CC\u666F\u9002\u914D";           // 背景适配
-    // Batch log file name prefix; a timestamp is appended per run.
+<｜｜DSML｜｜parameter name="put">    // Batch log file name prefix; a timestamp is appended per run.
     var logPrefix = "\u80CC\u666F\u9002\u914D\u65E5\u5FD7";      // 背景适配日志
+    // Batch log folder (relative to the script); logs are written here
+    // instead of cluttering the output folder or the repo root.
+    var logFolderName = "logs";
     // Persistent records written only after saveAs and a clean close. A later
     // run skips a source only when both its record and output file exist.
     var completionFileName = "\u80CC\u666F\u9002\u914D\u5B8C\u6210\u8BB0\u5F55.txt"; // 背景适配完成记录.txt
@@ -124,6 +127,7 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
 
     var listFile = new File(scriptFolder.fsName + "/" + listFileName);
     var outputFolder = new Folder(scriptFolder.fsName + "/" + outputFolderName);
+    var logFolder = new Folder(scriptFolder.fsName + "/" + logFolderName);
     var completionFile = new File(outputFolder.fsName + "/" + completionFileName);
 
     var logPath = null;
@@ -230,12 +234,14 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
     function openLog() {
         // Unique run-oriented name so previous logs are never overwritten.
         var name = logPrefix + "-" + timestampCompact(startTime) + ".txt";
-        var candidates = [new File(scriptFolder.fsName + "/" + name)];
+        var candidates = [];
+        var logFolder = new File(scriptFolder.fsName + "/" + logFolderName);
         try {
-            ensureFolder(outputFolder);
-            candidates.unshift(new File(outputFolder.fsName + "/" + name));
+            ensureFolder(logFolder);
+            candidates.push(new File(logFolder.fsName + "/" + name));
         } catch (e) {
             // Fall back to the script folder below.
+            candidates.push(new File(scriptFolder.fsName + "/" + name));
         }
         for (var i = 0; i < candidates.length; i++) {
             try {
@@ -495,7 +501,15 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
         var imported = 0;
         var logs = [];
         try {
+            // Scan the current log folder first, then the legacy output folder
+            // (older runs wrote batch logs next to the outputs).
             logs = folderObj.getFiles(logPrefix + "-*.txt");
+            if (folderObj.fsName !== logFolder.fsName) {
+                var older = logFolder.getFiles(logPrefix + "-*.txt");
+                for (var oi = 0; oi < older.length; oi++) {
+                    logs.push(older[oi]);
+                }
+            }
         } catch (listError) {
             log("WARN could not scan legacy logs for resume records: " + listError);
             return imported;
@@ -1787,7 +1801,7 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
         // unrelated historical network records never trigger existence checks.
         if (hasMissingRequestedCompletion(requestedCompletionKeys, completedRecords)) {
             importLegacyCompletionRecords(
-                outputFolder,
+                logFolder,
                 completedRecords,
                 completionFile,
                 requestedCompletionKeys
