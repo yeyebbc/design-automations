@@ -899,6 +899,12 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
         return item.typename !== "RasterItem" && item.typename !== "MeshItem";
     }
 
+    function isUnsafeGraphBackgroundGroup(item) {
+        return item.typename === "GroupItem" &&
+            trimText(item.name).toLowerCase() === "background clip" &&
+            trimText(getContainingLayerName(item)).toLowerCase() === "graph";
+    }
+
     /*
     Finds art objects and layers whose names contain "highlight" or
     "overlay" (case-insensitive) anywhere in the document and hides them, so
@@ -1585,6 +1591,10 @@ Consistency: fileCount == fileProcessed == fileSkipped + fileDone
             log("Info: background " + background.typename + " name=\"" + background.name +
                 "\" layer=\"" + getContainingLayerName(background) + "\"");
             logStage(sequence, total, path, "describe-background", "done");
+
+            if (isUnsafeGraphBackgroundGroup(background)) {
+                throw makeSkip("Known unsafe GroupItem \"Background Clip\" on Graph layer");
+            }
 
             // Locked/hidden layers block creation of new artwork ("Target layer
             // cannot be modified"), so make the whole document visible and
